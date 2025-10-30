@@ -139,33 +139,33 @@ export async function handleFiles({
         objectCacheControl = objectInfo.cacheControl;
       }
 
-      // Build headers for signing
+      // Create URL with query parameters for content type
+      const url = new URL(
+        `${credentials!.endpoint}/${bucketName}/${objectKey}`
+      );
+
+      // Add S3-specific query parameters
+      if (objectAcl) {
+        url.searchParams.set('x-amz-acl', objectAcl);
+      }
+      if (objectStorageClass) {
+        url.searchParams.set('x-amz-storage-class', objectStorageClass);
+      }
+
+      // Build headers that the client MUST send (these will be in the signature)
       const headers: Record<string, string> = {
         'Content-Type': file.type,
-        'Content-Length': String(file.size),
       };
 
-      // Add metadata headers
+      // Add metadata headers (client must send these)
       for (const [key, value] of Object.entries(objectMetadata)) {
         headers[`x-amz-meta-${key}`] = value;
       }
 
-      // Add optional headers
-      if (objectAcl) {
-        headers['x-amz-acl'] = objectAcl;
-      }
-      if (objectStorageClass) {
-        headers['x-amz-storage-class'] = objectStorageClass;
-      }
+      // Add cache control if present (client must send this)
       if (objectCacheControl) {
         headers['Cache-Control'] = objectCacheControl;
       }
-
-      // Create URL
-      const url = new URL(
-        `${credentials!.endpoint}/${bucketName}/${objectKey}`
-      );
-      url.searchParams.set('X-Amz-Expires', String(signedUrlExpiresIn));
 
       // Sign the request
       const signedRequest = await client.sign(url.toString(), {
@@ -173,13 +173,16 @@ export async function handleFiles({
         headers,
         aws: {
           signQuery: true,
+          allHeaders: true, // Include all headers in signature
         },
       });
 
-      const signedUrl = signedRequest.url;
+      // Add expiration to the signed URL
+      const signedUrl = new URL(signedRequest.url);
+      signedUrl.searchParams.set('X-Amz-Expires', String(signedUrlExpiresIn));
 
       return {
-        signedUrl,
+        signedUrl: signedUrl.toString(),
         file: { ...file, objectKey, objectMetadata, objectCacheControl },
       };
     })
