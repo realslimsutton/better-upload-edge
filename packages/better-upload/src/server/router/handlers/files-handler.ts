@@ -139,38 +139,19 @@ export async function handleFiles({
         objectCacheControl = objectInfo.cacheControl;
       }
 
-      // Build the URL with expiration in the query string
+      // Build the URL
       const url = new URL(
         `${credentials!.endpoint}/${bucketName}/${objectKey}`
       );
       url.searchParams.set('X-Amz-Expires', String(signedUrlExpiresIn));
 
-      // Build headers that the client MUST send
-      const headers: Record<string, string> = {
-        'Content-Type': file.type,
-      };
-
-      // Add metadata headers
-      for (const [key, value] of Object.entries(objectMetadata)) {
-        headers[`x-amz-meta-${key}`] = value;
-      }
-
-      // Add optional headers
-      if (objectCacheControl) {
-        headers['Cache-Control'] = objectCacheControl;
-      }
-
-      // Sign the request with allHeaders: true
-      const signedRequest = await client.sign(
-        new Request(url.toString(), { method: 'PUT' }),
-        {
-          aws: {
-            signQuery: true,
-            allHeaders: true,
-          },
-          headers,
-        }
-      );
+      // Sign with NO custom headers (only host is signed automatically)
+      const signedRequest = await client.sign(url.toString(), {
+        method: 'PUT',
+        aws: {
+          signQuery: true,
+        },
+      });
 
       const signedUrl = signedRequest.url;
 
