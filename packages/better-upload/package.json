@@ -1,7 +1,7 @@
 {
-  "name": "better-upload",
+  "name": "better-upload-edge",
   "description": "Simple and easy file uploads for React",
-  "version": "2.0.3",
+  "version": "0.0.1",
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
