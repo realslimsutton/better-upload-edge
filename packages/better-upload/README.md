@@ -1,3 +1,9 @@
+# Do not use this version
+
+This version has been temporarily hacked together to add basic support for edge (specifically Cloudflare) workers.
+
+Version 3 should support edge environments. See [the official package here](https://github.com/Nic13Gamer/better-upload).
+
 # Better Upload
 
 Simple and easy file uploads for React. Upload files directly to any S3-compatible service with minimal setup.
