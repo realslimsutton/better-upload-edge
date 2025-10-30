@@ -9,33 +9,28 @@ import type { S3Client } from '@aws-sdk/client-s3';
 import { extractS3Config } from '@/server/utils/internal/extract-s3-config';
 import { presignUrl } from '@/server/utils/internal/presign-url';
 
+import { AwsClient } from 'aws4fetch';
+
 export async function handleFiles({
   req,
-  client,
   credentials,
   defaultBucketName,
   route,
   data,
 }: {
   req: Request;
-  client?: S3Client;
   credentials?: S3Credentials;
   defaultBucketName: string;
   route: Route;
   data: UploadFileSchema;
 }) {
-  // Extract credentials - prefer provided credentials, fallback to extracting from client
-  let s3Credentials: S3Credentials | null = credentials || null;
+  const client = new AwsClient({
+    accessKeyId: credentials!.accessKeyId,
+    secretAccessKey: credentials!.secretAccessKey,
+    region: credentials!.region,
+    service: 's3',
+  });
 
-  if (!s3Credentials && client) {
-    s3Credentials = await extractS3Config(client);
-  }
-
-  if (!s3Credentials) {
-    throw new Error(
-      'Either S3Client or credentials must be provided. For Cloudflare Workers, provide credentials directly.'
-    );
-  }
   const { files } = data;
   const maxFiles = route.maxFiles || config.defaultMaxFiles;
   const maxFileSize = route.maxFileSize || config.defaultMaxFileSize;
@@ -144,24 +139,44 @@ export async function handleFiles({
         objectCacheControl = objectInfo.cacheControl;
       }
 
-      // Use presignUrl for Cloudflare Workers compatibility
-      const signedUrl = await presignUrl({
-        accessKeyId: s3Credentials.accessKeyId,
-        secretAccessKey: s3Credentials.secretAccessKey,
-        region: s3Credentials.region,
-        endpoint: s3Credentials.endpoint,
-        bucket: bucketName,
-        key: objectKey,
+      // Build headers for signing
+      const headers: Record<string, string> = {
+        'Content-Type': file.type,
+        'Content-Length': String(file.size),
+      };
+
+      // Add metadata headers
+      for (const [key, value] of Object.entries(objectMetadata)) {
+        headers[`x-amz-meta-${key}`] = value;
+      }
+
+      // Add optional headers
+      if (objectAcl) {
+        headers['x-amz-acl'] = objectAcl;
+      }
+      if (objectStorageClass) {
+        headers['x-amz-storage-class'] = objectStorageClass;
+      }
+      if (objectCacheControl) {
+        headers['Cache-Control'] = objectCacheControl;
+      }
+
+      // Create URL
+      const url = new URL(
+        `${credentials!.endpoint}/${bucketName}/${objectKey}`
+      );
+      url.searchParams.set('X-Amz-Expires', String(signedUrlExpiresIn));
+
+      // Sign the request
+      const signedRequest = await client.sign(url.toString(), {
         method: 'PUT',
-        expiresIn: signedUrlExpiresIn,
-        contentType: file.type,
-        contentLength: file.size,
-        metadata: objectMetadata,
-        acl: objectAcl,
-        storageClass: objectStorageClass,
-        cacheControl: objectCacheControl,
-        signableHeaders: objectCacheControl ? ['cache-control'] : [],
+        headers,
+        aws: {
+          signQuery: true,
+        },
       });
+
+      const signedUrl = signedRequest.url;
 
       return {
         signedUrl,

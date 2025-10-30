@@ -1,8 +1,6 @@
-import { AwsClient } from 'aws4fetch';
-
 /**
- * Creates a presigned URL for S3 using AWS Signature Version 4 query string signing.
- * Compatible with Cloudflare Workers using aws4fetch.
+ * Creates a presigned URL for S3/R2 using AWS Signature Version 4 query string signing.
+ * Compatible with Cloudflare Workers (uses Web Crypto API).
  */
 
 export interface PresignUrlParams {
@@ -24,7 +22,7 @@ export interface PresignUrlParams {
 }
 
 /**
- * Creates a presigned URL for S3 operations using AWS Signature Version 4 via aws4fetch.
+ * Creates a presigned URL for S3 operations using AWS Signature Version 4.
  */
 export async function presignUrl(params: PresignUrlParams): Promise<string> {
   const {
@@ -36,32 +34,20 @@ export async function presignUrl(params: PresignUrlParams): Promise<string> {
     key,
     method = 'PUT',
     expiresIn = 120,
-    contentType,
-    contentLength,
     metadata = {},
     acl,
     storageClass,
-    cacheControl,
   } = params;
 
-  // Create aws4fetch client
-  const aws = new AwsClient({
-    accessKeyId,
-    secretAccessKey,
-    region,
-    service: 's3',
-  });
-
-  // Normalize endpoint (remove trailing slash)
+  // Normalize endpoint
   const normalizedEndpoint = endpoint.replace(/\/$/, '');
 
-  // Determine if using path-style or virtual-hosted-style URLs
-  // Use path-style for: localhost, MinIO, Cloudflare R2, or buckets with dots
+  // Use path-style for R2, MinIO, localhost
   const usePathStyle =
+    normalizedEndpoint.includes('r2.cloudflarestorage.com') ||
     normalizedEndpoint.includes('localhost') ||
     normalizedEndpoint.includes('127.0.0.1') ||
     normalizedEndpoint.includes('minio') ||
-    normalizedEndpoint.includes('r2.cloudflarestorage.com') ||
     bucket.includes('.');
 
   const host = usePathStyle
@@ -69,42 +55,144 @@ export async function presignUrl(params: PresignUrlParams): Promise<string> {
     : `${bucket}.${normalizedEndpoint.replace(/^https?:\/\//, '')}`;
 
   const path = usePathStyle ? `/${bucket}/${key}` : `/${key}`;
-  const protocol = normalizedEndpoint.startsWith('https') ? 'https' : 'http';
-  const baseUrl = `${protocol}://${host}${path}`;
 
-  // Build URL with query parameters for presigned URL
-  const url = new URL(baseUrl);
-  url.searchParams.set('X-Amz-Expires', expiresIn.toString());
+  // Canonical URI - encode each path segment
+  const canonicalUri = path
+    .split('/')
+    .map((segment) => encodeURIComponent(segment).replace(/%2F/g, '/'))
+    .join('/');
 
-  // Add metadata as query parameters
+  // Build date strings
+  const now = new Date();
+  const dateStamp = now.toISOString().slice(0, 10).replace(/-/g, '');
+  const amzDate = `${dateStamp}T${now.toISOString().slice(11, 19).replace(/:/g, '')}Z`;
+  const credentialScope = `${dateStamp}/${region}/s3/aws4_request`;
+
+  // Build query parameters
+  const queryParams: Record<string, string> = {
+    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
+    'X-Amz-Credential': `${accessKeyId}/${credentialScope}`,
+    'X-Amz-Date': amzDate,
+    'X-Amz-Expires': expiresIn.toString(),
+    'X-Amz-SignedHeaders': 'host',
+  };
+
+  // Add metadata
   Object.entries(metadata).forEach(([k, v]) => {
-    url.searchParams.set(`x-amz-meta-${k.toLowerCase()}`, v);
+    if (v) queryParams[`x-amz-meta-${k.toLowerCase()}`] = v;
   });
 
-  // Add S3-specific query parameters
   if (acl) {
-    url.searchParams.set('x-amz-acl', acl);
+    queryParams['x-amz-acl'] = acl;
   }
 
   if (storageClass) {
-    url.searchParams.set('x-amz-storage-class', storageClass);
+    queryParams['x-amz-storage-class'] = storageClass;
   }
 
-  if (cacheControl) {
-    url.searchParams.set('Cache-Control', cacheControl);
-  }
+  // Canonical query string
+  const canonicalQueryString = Object.keys(queryParams)
+    .sort()
+    .map((k) => {
+      const value = queryParams[k];
+      return `${encodeURIComponent(k)}=${encodeURIComponent(value!)}`;
+    })
+    .join('&');
 
-  // For presigned URLs, we don't include content-type and content-length in the signature
-  // The client will send them, but they're not part of the presigned URL signature
-  // Create a Request object without body-related headers
-  const request = new Request(url.toString(), {
+  // Canonical headers
+  const canonicalHeaders = `host:${host}\n`;
+  const signedHeaders = 'host';
+
+  // Canonical request
+  const canonicalRequest = [
     method,
-  });
+    canonicalUri,
+    canonicalQueryString,
+    canonicalHeaders,
+    signedHeaders,
+    'UNSIGNED-PAYLOAD',
+  ].join('\n');
 
-  // Sign the request with aws4fetch - use signQuery to create presigned URL
-  const signedRequest = await aws.sign(request, {
-    aws: { signQuery: true },
-  });
+  // String to sign
+  const stringToSign = [
+    'AWS4-HMAC-SHA256',
+    amzDate,
+    credentialScope,
+    await sha256(canonicalRequest),
+  ].join('\n');
 
-  return signedRequest.url;
+  // Calculate signature
+  const signature = await calculateSignature(
+    secretAccessKey,
+    dateStamp,
+    region,
+    stringToSign
+  );
+
+  // Add signature to query params
+  queryParams['X-Amz-Signature'] = signature;
+
+  // Build final URL
+  const finalQueryString = Object.keys(queryParams)
+    .sort()
+    .map((k) => {
+      const value = queryParams[k];
+      return `${encodeURIComponent(k)}=${encodeURIComponent(value!)}`;
+    })
+    .join('&');
+
+  const protocol = normalizedEndpoint.startsWith('https') ? 'https' : 'http';
+  return `${protocol}://${host}${path}?${finalQueryString}`;
+}
+
+// Helper functions using Web Crypto API
+async function sha256(message: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+async function hmac(
+  key: ArrayBuffer | string,
+  message: string
+): Promise<ArrayBuffer> {
+  const encoder = new TextEncoder();
+  const keyData =
+    typeof key === 'string'
+      ? await crypto.subtle.importKey(
+          'raw',
+          encoder.encode(key),
+          { name: 'HMAC', hash: 'SHA-256' },
+          false,
+          ['sign']
+        )
+      : await crypto.subtle.importKey(
+          'raw',
+          key,
+          { name: 'HMAC', hash: 'SHA-256' },
+          false,
+          ['sign']
+        );
+
+  return await crypto.subtle.sign('HMAC', keyData, encoder.encode(message));
+}
+
+async function calculateSignature(
+  secretKey: string,
+  dateStamp: string,
+  region: string,
+  stringToSign: string
+): Promise<string> {
+  const kDate = await hmac(`AWS4${secretKey}`, dateStamp);
+  const kRegion = await hmac(kDate, region);
+  const kService = await hmac(kRegion, 's3');
+  const kSigning = await hmac(kService, 'aws4_request');
+  const signature = await hmac(kSigning, stringToSign);
+
+  return Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
 }
