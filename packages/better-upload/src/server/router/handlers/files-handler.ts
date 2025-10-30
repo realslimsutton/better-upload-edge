@@ -139,50 +139,43 @@ export async function handleFiles({
         objectCacheControl = objectInfo.cacheControl;
       }
 
-      // Create URL with query parameters for content type
+      // Build the URL with expiration in the query string
       const url = new URL(
         `${credentials!.endpoint}/${bucketName}/${objectKey}`
       );
+      url.searchParams.set('X-Amz-Expires', String(signedUrlExpiresIn));
 
-      // Add S3-specific query parameters
-      if (objectAcl) {
-        url.searchParams.set('x-amz-acl', objectAcl);
-      }
-      if (objectStorageClass) {
-        url.searchParams.set('x-amz-storage-class', objectStorageClass);
-      }
-
-      // Build headers that the client MUST send (these will be in the signature)
+      // Build headers that the client MUST send
       const headers: Record<string, string> = {
         'Content-Type': file.type,
       };
 
-      // Add metadata headers (client must send these)
+      // Add metadata headers
       for (const [key, value] of Object.entries(objectMetadata)) {
         headers[`x-amz-meta-${key}`] = value;
       }
 
-      // Add cache control if present (client must send this)
+      // Add optional headers
       if (objectCacheControl) {
         headers['Cache-Control'] = objectCacheControl;
       }
 
-      // Sign the request
-      const signedRequest = await client.sign(url.toString(), {
-        method: 'PUT',
-        headers,
-        aws: {
-          signQuery: true,
-          allHeaders: true, // Include all headers in signature
-        },
-      });
+      // Sign the request with allHeaders: true
+      const signedRequest = await client.sign(
+        new Request(url.toString(), { method: 'PUT' }),
+        {
+          aws: {
+            signQuery: true,
+            allHeaders: true,
+          },
+          headers,
+        }
+      );
 
-      // Add expiration to the signed URL
-      const signedUrl = new URL(signedRequest.url);
-      signedUrl.searchParams.set('X-Amz-Expires', String(signedUrlExpiresIn));
+      const signedUrl = signedRequest.url;
 
       return {
-        signedUrl: signedUrl.toString(),
+        signedUrl,
         file: { ...file, objectKey, objectMetadata, objectCacheControl },
       };
     })
