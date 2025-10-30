@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@aws-sdk/s3-request-presigner": "^3.645.0",
+    "aws4fetch": "^1.0.20",
     "zod": "^4.0.5"
   },
   "peerDependencies": {
